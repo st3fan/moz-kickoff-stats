@@ -1,0 +1,331 @@
+#!/usr/bin/env python
+
+import collections
+import copy
+import getpass
+import datetime
+import os
+import pickle
+import sys
+
+import requests
+import dateutil.parser
+
+def check_bugzilla_credentials(credentials):
+    url = "https://api-dev.bugzilla.mozilla.org/latest/bug"
+    params = { "id":800000, "username":credentials[0],"password":credentials[1] }
+    headers = { "Accepts": "application/json" }
+    r = requests.get(url, params=params, headers=headers)
+    r.raise_for_status()
+
+def fix_bug(bug):
+    def _fix_date_fields(thing, fields):
+        for field in fields:
+            if field in thing:
+                thing[field] = dateutil.parser.parse(thing[field], ignoretz=True)
+    def _fix_int_fields(thing, fields):
+        for field in fields:
+            if field in thing:
+                thing[field] = int(thing[field])
+    def _fix_bool_fields(thing, fields):
+        for field in fields:
+            if field in thing:
+                thing[field] = bool(int(thing[field]))
+    _fix_date_fields(bug, ['creation_time', 'last_change_time'])
+    _fix_int_fields(bug, ['id'])
+    _fix_bool_fields(bug, filter(lambda key: key.startswith('is_'), bug.keys()))
+    for comment in bug.get('comments', []):
+        _fix_date_fields(comment, ['creation_time'])
+        _fix_int_fields(comment, ['id'])
+        _fix_bool_fields(comment, filter(lambda key: key.startswith('is_'), comment.keys()))
+    for attachment in bug.get('attachments', []):
+        _fix_int_fields(attachment, ['id', 'bug_id', 'size'])
+        _fix_date_fields(attachment, ['creation_time', 'last_change_time'])
+        _fix_bool_fields(attachment, filter(lambda key: key.startswith('is_'), attachment.keys()))
+    for event in bug.get('history', []):
+        _fix_date_fields(event, ['change_time'])
+    bug['depends_on'] = [int(b) for b in bug.get('depends_on', [])]
+    return bug
+
+def find_bugs(product, component, changed_after=None, changed_before=None, changed_field=None, resolution=None, status=None, advanced=None, limit=None, credentials=None):
+    headers = { "Accepts": "application/json" }
+    params = { "product": product,
+               "component": component,
+               "include_fields": "_default"}
+    if changed_after:
+        params["changed_after"] = changed_after
+    if changed_before:
+        params["changed_before"] = changed_before
+    if changed_field:
+        params["changed_field"] = changed_field
+    if resolution:
+        params["resolution"] = resolution
+    if status:
+        params["status"] = status
+    if credentials:
+        params["username"] = credentials[0]
+        params["password"] = credentials[1]
+    if advanced:
+        for i,t in enumerate(advanced):
+            params["field%d-0-0" % i] = t[0]
+            params["type%d-0-0" % i] = t[1]
+            if len(t) == 3:
+                params["value%d-0-0" % i] = t[2]
+    if limit:
+        params['limit'] = str(limit)
+    url = "https://api-dev.bugzilla.mozilla.org/latest/bug"
+    json = requests.get(url, params=params, headers=headers).json()
+    bugs = json['bugs']
+    for bug in bugs:
+        fix_bug(bug)
+    return bugs
+
+def _chunk(l, n):
+    for i in xrange(0, len(l), n):
+        yield l[i:i+n]
+
+def fetch_bugs(ids, credentials=None):
+    bugs = []
+    for bug_ids in _chunk(ids, 500):
+        headers = { "Accepts": "application/json" }
+        params = { "include_fields": "_default,history",
+                   "id": bug_ids }
+        if credentials:
+            params["username"] = credentials[0]
+            params["password"] = credentials[1]
+        url = "https://api-dev.bugzilla.mozilla.org/latest/bug"
+        json = requests.get(url, params=params, headers=headers).json()
+        for bug in json.get('bugs', []):
+            bugs.append(fix_bug(bug))
+    return bugs
+
+def load_kickoff_bugs(credentials):
+    return find_bugs("mozilla.org", "Project Review", credentials=credentials)
+
+def load_team_bugs(credentials, kickoff_bugs):
+    bug_ids = []
+    for bug in kickoff_bugs:
+        for dependend_bug_id in bug.get('depends_on', []):
+            bug_ids.append(dependend_bug_id)
+    bug_ids = list(set(bug_ids))
+    return fetch_bugs(bug_ids, credentials=credentials)
+
+#
+# Change the bugs to how they looked at the specified point in time. Currently this
+# only updates status and resolution.
+#
+# Currently pit is non-inclusive, so 2013-04-01 means UP TO 2013-03-31T23:59:59
+#
+
+def warp_bug(bug, pit):
+    pit = dateutil.parser.parse(pit)
+    if bug['creation_time'] < pit:
+        # Make a deep copy of the bug, reset it to defaults
+        bug = copy.deepcopy(bug)
+        # Loop over the bug history in reverse order and undo changes until we have hit the date
+        warped_history = []
+        for event in reversed(bug.get('history', [])):
+            if event['change_time'] >= pit:
+                for change in event.get('changes', []):
+                    if change.get('field_name') == 'status':
+                        bug['status'] = change['removed']
+                    elif change.get('field_name') == 'resolution':
+                        bug['resolution'] = change['removed']
+                    elif change.get('field_name') == 'summary':
+                        bug['summary'] = change['removed']
+            else:
+                warped_history.insert(0, event)
+        bug['history'] = warped_history
+        return bug
+    
+def warp_bugs(bugs, pit):
+    for bug in bugs:
+        warped_bug = warp_bug(bug, pit)
+        if warped_bug:
+            yield warped_bug
+
+def current_quarter():
+    """Return the current quarter"""
+    d = datetime.datetime.now()
+    return (d.month-1)//3+1
+
+def current_quarter_spec():
+    d = datetime.datetime.now()
+    return "%dQ%d" % (d.year, (d.month-1)//3+1)
+
+def quarter_date_range(year, quarter):
+    """Return the bugzilla date range for the specified year and quarter"""
+    after = "%4d-%.2d-01" % (year, (quarter-1)*3+1)
+    if quarter < 4:
+        before = "%4.d-%.2d-01" % (year, (quarter-1)*3+4)
+    else:
+        before = "%4d-01-01" % (year + 1)
+    return (after,before)
+
+def current_quarter_date_range():
+    """Return the bugzilla date range for the current quarter"""
+    d = datetime.datetime.now()
+    return quarter_date_range(d.year, current_quarter())
+
+def count_team_bugs(bugs, team):
+    total = 0
+    open = 0
+    resolved_fixed = 0
+    resolved_invalid = 0
+    resolved_other = 0
+    for bug in bugs:
+        match = False
+        if team == 'security':
+            match = (bug['product'] == 'mozilla.org' and bug['component'] == 'Security Assurance: Review Request')
+        elif team == 'legal':
+            match = bug['product'] == 'Legal'
+        elif team == 'privacy':
+            match = bug['product'] == 'Privacy'
+        elif team == 'data':
+            match = bug['product'] == 'Data Safety'
+        elif team == 'finance':
+            match = bug['product'] == 'Finance'
+        elif team == 'other':
+            match = (bug['product'] != 'mozilla.org' and bug['component'] != 'Project Review')
+        if match:
+            total += 1
+            if bug['status'] in ('NEW', 'REOPENED', 'ASSIGNED'):
+                open += 1
+            elif bug['status'] in ('RESOLVED', 'VERIFIED'):
+                if bug['resolution'] == 'FIXED':
+                    resolved_fixed += 1
+                elif bug['resolution'] == 'INVALID':
+                    resolved_invalid += 1
+                else:
+                    resolved_other += 1
+
+    return { "team": team,
+             "total": total,
+             "open": open,
+             "resolved_fixed": resolved_fixed,
+             "resolved_invalid": resolved_invalid,
+             "resolved_other": resolved_other }
+
+if __name__ == "__main__":
+    
+    if len(sys.argv) != 2:
+        print "usage: update-statistics.py <bugzilla-username>"
+        sys.exit(1)
+     
+    password = getpass.getpass("Bugzilla password for %s (not persisted anywhere): " % sys.argv[1])
+    credentials=(sys.argv[1], password)
+
+    check_bugzilla_credentials(credentials)
+    
+    #
+
+    bugs = {}
+
+    project_bugs = load_kickoff_bugs(credentials)
+    for bug in project_bugs:
+        bugs[bug['id']] = bug
+
+    team_bugs = load_team_bugs(credentials, project_bugs)
+    for bug in team_bugs:
+        bugs[bug['id']] = bug
+
+    #
+
+    def bugs_created_in_date_range(bugs, start, end):
+        start = dateutil.parser.parse(start)
+        end = dateutil.parser.parse(end)
+        for bug in bugs:
+            if bug['creation_time'] >= start and bug['creation_time'] < end:
+                yield bug
+
+    def get_team(bug):
+        if bug['product'] == 'mozilla.org' and bug['component'] == 'Security Assurance: Review Request':
+            return 'security'
+        if bug['product'] == 'Legal':
+            return 'legal'
+        if bug['product'] == 'Privacy':
+            return 'privacy'
+        if bug['product'] == 'Data Safety':
+            return 'data'
+        if bug['product'] == 'Finance':
+            return 'finance'            
+        if bug['product'] != 'mozilla.org' and bug['component'] != 'Project Review':
+            return 'other'
+
+    def count_team_bugs(bugs):
+        
+        total = collections.defaultdict(int)
+        open = collections.defaultdict(int)
+        resolved_fixed = collections.defaultdict(int)
+        resolved_invalid = collections.defaultdict(int)
+        resolved_other = collections.defaultdict(int)
+        
+        totals_by_team = collections.defaultdict(int)
+
+        bugs_by_id = {}
+        for bug in bugs:
+            bugs_by_id[bug['id']] = bug
+
+        for bug in bugs:
+            if bug['product'] == 'mozilla.org' and bug['component'] == 'Project Review':
+                for team_bug_id in bug['depends_on']:
+                    team_bug = bugs_by_id.get(team_bug_id)
+                    if not team_bug:
+                        total['hidden'] += 1
+                    else:
+                        team = get_team(team_bug)
+                        total[team] += 1
+                        if team_bug['status'] in ('NEW', 'REOPENED', 'ASSIGNED'):
+                            open[team] += 1
+                        elif team_bug['status'] in ('RESOLVED', 'VERIFIED'):
+                            if team_bug['resolution'] == 'FIXED':
+                                resolved_fixed[team] += 1
+                            elif team_bug['resolution'] == 'INVALID':
+                                resolved_invalid[team] += 1
+                            else:
+                                resolved_other[team] += 1
+
+        result = {}
+        for team in ('security', 'legal', 'privacy', 'data', 'finance', 'other', 'hidden'):
+            result[team] = {'team': team,
+                            'total': total[team],
+                            'open': open[team],
+                            'resolved_fixed': resolved_fixed[team],
+                            'resolved_invalid': resolved_invalid[team],
+                            'resolved_other': resolved_other[team]}
+        return result
+    
+    for date_range in (quarter_date_range(2012,4), quarter_date_range(2013,1), quarter_date_range(2013,2)):
+
+        date_start = date_range[0]
+        date_end = date_range[1]
+
+        quarter_bugs = bugs_created_in_date_range(bugs.values(), date_start, date_end)
+        warped_bugs = list(warp_bugs(quarter_bugs, date_end))
+        
+        created = 0
+        opened = 0
+        closed = 0
+
+        for bug in warped_bugs:
+            if bug['product'] == 'mozilla.org' and bug['component'] == 'Project Review':
+                created += 1
+                if bug['status'] in ('NEW', 'REOPENED', 'ASSIGNED'):
+                    opened += 1
+                elif bug['status'] in ('RESOLVED', 'VERIFIED'):
+                    closed += 1
+
+        print "=============================================================================="
+        print "Results for quarter %s" % date_start
+        print "=============================================================================="
+        print "* Number of project bugs filed    : %d" % created
+        print "* Number of project bugs open     : %d" % opened
+        print "* Number of project bugs resolved : %d" % closed
+        print "=============================================================================="
+        print "Team bugs detailed by team / area"
+        print "=============================================================================="
+        print "%-12s %12s %12s %12s %12s %12s" % ('Team', 'Total', 'Open', 'Fixed', 'Invalid', 'Other')
+        for team,stats in count_team_bugs(warped_bugs).items():
+            print "%(team)-12s %(total)12d %(open)12d %(resolved_fixed)12d %(resolved_invalid)12d %(resolved_other)12d" % stats
+        print "=============================================================================="
+        print ""
