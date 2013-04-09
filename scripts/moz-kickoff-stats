@@ -252,30 +252,31 @@ if __name__ == "__main__":
         if bug['product'] != 'mozilla.org' and bug['component'] != 'Project Review':
             return 'other'
 
-    def parse_project(bug):
-        comment = bug['comments'][0]['text']
-        for line in comment.split("\n"):
-            if line.startswith("Mozilla Project: "):
-                name,value = line.strip().split(": ", 1)
-                if name == "Mozilla Project":
-                    return value
+    def parse_initiative_from_bug(bug):
+        if len(bug.get('comments', [])) > 0:
+            comment = bug['comments'][0]['text']
+            for line in comment.split("\n"):
+                if line.startswith("Key Initiative: "):
+                    name,value = line.strip().split(": ", 1)
+                    if name == "Key Initiative":
+                        return value
 
-    def count_project_bugs(bugs):
+    def count_initiatives(bugs):
         stats = {}
         for bug in bugs:
-            project = parse_project(bug)
-            if project not in stats:
-                stats[project] = {'project': project, 'total': 0, 'open': 0, 'resolved_fixed': 0, 'resolved_invalid': 0, 'resolved_other': 0}
-            stats[project]['total'] += 1
+            initiative = parse_initiative_from_bug(bug)
+            if initiative not in stats:
+                stats[initiative] = {'initiative': initiative, 'total': 0, 'open': 0, 'resolved_fixed': 0, 'resolved_invalid': 0, 'resolved_other': 0}
+            stats[initiative]['total'] += 1
             if bug['status'] in ('NEW', 'REOPENED', 'ASSIGNED'):
-                stats[project]['open'] += 1
+                stats[initiative]['open'] += 1
             elif bug['status'] in ('RESOLVED', 'VERIFIED'):
                 if bug['resolution'] == 'FIXED':
-                    stats[project]['resolved_fixed'] += 1
+                    stats[initiative]['resolved_fixed'] += 1
                 elif bug['resolution'] == 'INVALID':
-                    stats[project]['resolved_invalid'] += 1
+                    stats[initiative]['resolved_invalid'] += 1
                 else:
-                    stats[project]['resolved_other'] += 1
+                    stats[initiative]['resolved_other'] += 1
         return stats
 
     def count_team_bugs(bugs):
@@ -348,11 +349,11 @@ if __name__ == "__main__":
         print "* Number of project bugs open     : %d" % opened
         print "* Number of project bugs resolved : %d" % closed
         print "=============================================================================="
-        print "Project bugs by Mozilla Project"
+        print "Project bugs by Initiative"
         print "=============================================================================="
-        print "%-17s %11s %11s %11s %11s %11s" % ('Project', 'Total', 'Open', 'Fixed', 'Invalid', 'Other')
-        for project,stats in count_project_bugs(warped_bugs).items():
-            print "%(project)-17s %(total)11d %(open)11d %(resolved_fixed)11d %(resolved_invalid)11d %(resolved_other)11d" % stats
+        print "%-17s %11s %11s %11s %11s %11s" % ('Initiative', 'Total', 'Open', 'Fixed', 'Invalid', 'Other')
+        for initiative,stats in count_initiatives(warped_bugs).items():
+            print "%(initiative)-17s %(total)11d %(open)11d %(resolved_fixed)11d %(resolved_invalid)11d %(resolved_other)11d" % stats
         print "=============================================================================="
         print "Team bugs detailed by team / area"
         print "=============================================================================="
