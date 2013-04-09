@@ -51,7 +51,7 @@ def find_bugs(product, component, changed_after=None, changed_before=None, chang
     headers = { "Accepts": "application/json" }
     params = { "product": product,
                "component": component,
-               "include_fields": "_default"}
+               "include_fields": "_default,comments"} # TODO This should be an option
     if changed_after:
         params["changed_after"] = changed_after
     if changed_before:
@@ -137,7 +137,7 @@ def warp_bug(bug, pit):
                 warped_history.insert(0, event)
         bug['history'] = warped_history
         return bug
-    
+
 def warp_bugs(bugs, pit):
     for bug in bugs:
         warped_bug = warp_bug(bug, pit)
@@ -207,16 +207,16 @@ def count_team_bugs(bugs, team):
              "resolved_other": resolved_other }
 
 if __name__ == "__main__":
-    
+
     if len(sys.argv) != 2:
         print "usage: update-statistics.py <bugzilla-username>"
         sys.exit(1)
-     
+
     password = getpass.getpass("Bugzilla password for %s (not persisted anywhere): " % sys.argv[1])
     credentials=(sys.argv[1], password)
 
     check_bugzilla_credentials(credentials)
-    
+
     #
 
     bugs = {}
@@ -225,7 +225,7 @@ if __name__ == "__main__":
     for bug in project_bugs:
         bugs[bug['id']] = bug
 
-    team_bugs = load_team_bugs(credentials, project_bugs)
+    team_bugs = [] # load_team_bugs(credentials, project_bugs)
     for bug in team_bugs:
         bugs[bug['id']] = bug
 
@@ -248,18 +248,44 @@ if __name__ == "__main__":
         if bug['product'] == 'Data Safety':
             return 'data'
         if bug['product'] == 'Finance':
-            return 'finance'            
+            return 'finance'
         if bug['product'] != 'mozilla.org' and bug['component'] != 'Project Review':
             return 'other'
 
+    def parse_project(bug):
+        comment = bug['comments'][0]['text']
+        for line in comment.split("\n"):
+            if line.startswith("Mozilla Project: "):
+                name,value = line.strip().split(": ", 1)
+                if name == "Mozilla Project":
+                    return value
+
+    def count_project_bugs(bugs):
+        stats = {}
+        for bug in bugs:
+            project = parse_project(bug)
+            if project not in stats:
+                stats[project] = {'project': project, 'total': 0, 'open': 0, 'resolved_fixed': 0, 'resolved_invalid': 0, 'resolved_other': 0}
+            stats[project]['total'] += 1
+            if bug['status'] in ('NEW', 'REOPENED', 'ASSIGNED'):
+                stats[project]['open'] += 1
+            elif bug['status'] in ('RESOLVED', 'VERIFIED'):
+                if bug['resolution'] == 'FIXED':
+                    stats[project]['resolved_fixed'] += 1
+                elif bug['resolution'] == 'INVALID':
+                    stats[project]['resolved_invalid'] += 1
+                else:
+                    stats[project]['resolved_other'] += 1
+        return stats
+
     def count_team_bugs(bugs):
-        
+
         total = collections.defaultdict(int)
         open = collections.defaultdict(int)
         resolved_fixed = collections.defaultdict(int)
         resolved_invalid = collections.defaultdict(int)
         resolved_other = collections.defaultdict(int)
-        
+
         totals_by_team = collections.defaultdict(int)
 
         bugs_by_id = {}
@@ -294,7 +320,7 @@ if __name__ == "__main__":
                             'resolved_invalid': resolved_invalid[team],
                             'resolved_other': resolved_other[team]}
         return result
-    
+
     for date_range in (quarter_date_range(2012,4), quarter_date_range(2013,1), quarter_date_range(2013,2)):
 
         date_start = date_range[0]
@@ -302,7 +328,7 @@ if __name__ == "__main__":
 
         quarter_bugs = bugs_created_in_date_range(bugs.values(), date_start, date_end)
         warped_bugs = list(warp_bugs(quarter_bugs, date_end))
-        
+
         created = 0
         opened = 0
         closed = 0
@@ -321,6 +347,12 @@ if __name__ == "__main__":
         print "* Number of project bugs filed    : %d" % created
         print "* Number of project bugs open     : %d" % opened
         print "* Number of project bugs resolved : %d" % closed
+        print "=============================================================================="
+        print "Project bugs by Mozilla Project"
+        print "=============================================================================="
+        print "%-17s %11s %11s %11s %11s %11s" % ('Project', 'Total', 'Open', 'Fixed', 'Invalid', 'Other')
+        for project,stats in count_project_bugs(warped_bugs).items():
+            print "%(project)-17s %(total)11d %(open)11d %(resolved_fixed)11d %(resolved_invalid)11d %(resolved_other)11d" % stats
         print "=============================================================================="
         print "Team bugs detailed by team / area"
         print "=============================================================================="
