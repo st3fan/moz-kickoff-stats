@@ -225,7 +225,7 @@ if __name__ == "__main__":
     for bug in project_bugs:
         bugs[bug['id']] = bug
 
-    team_bugs = [] # load_team_bugs(credentials, project_bugs)
+    team_bugs = load_team_bugs(credentials, project_bugs)
     for bug in team_bugs:
         bugs[bug['id']] = bug
 
@@ -257,9 +257,14 @@ if __name__ == "__main__":
             comment = bug['comments'][0]['text']
             for line in comment.split("\n"):
                 if line.startswith("Key Initiative: "):
-                    name,value = line.strip().split(": ", 1)
-                    if name == "Key Initiative":
-                        return value
+                    l = line.strip().split(": ", 1)
+                    if len(l) == 2:
+                        name = l[0]
+                        value = l[1]
+                        if name == "Key Initiative":
+                            return value
+                    else:
+                        return line.strip()
 
     def count_initiatives(bugs):
         stats = {}
