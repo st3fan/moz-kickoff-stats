@@ -269,19 +269,20 @@ if __name__ == "__main__":
     def count_initiatives(bugs):
         stats = {}
         for bug in bugs:
-            initiative = parse_initiative_from_bug(bug)
-            if initiative not in stats:
-                stats[initiative] = {'initiative': initiative, 'total': 0, 'open': 0, 'resolved_fixed': 0, 'resolved_invalid': 0, 'resolved_other': 0}
-            stats[initiative]['total'] += 1
-            if bug['status'] in ('NEW', 'REOPENED', 'ASSIGNED'):
-                stats[initiative]['open'] += 1
-            elif bug['status'] in ('RESOLVED', 'VERIFIED'):
-                if bug['resolution'] == 'FIXED':
-                    stats[initiative]['resolved_fixed'] += 1
-                elif bug['resolution'] == 'INVALID':
-                    stats[initiative]['resolved_invalid'] += 1
-                else:
-                    stats[initiative]['resolved_other'] += 1
+            if bug['product'] == 'mozilla.org' and bug['component'] == 'Project Review':
+                initiative = parse_initiative_from_bug(bug)
+                if initiative not in stats:
+                    stats[initiative] = {'initiative': initiative, 'total': 0, 'open': 0, 'resolved_fixed': 0, 'resolved_invalid': 0, 'resolved_other': 0}
+                stats[initiative]['total'] += 1
+                if bug['status'] in ('NEW', 'REOPENED', 'ASSIGNED'):
+                    stats[initiative]['open'] += 1
+                elif bug['status'] in ('RESOLVED', 'VERIFIED'):
+                    if bug['resolution'] == 'FIXED':
+                        stats[initiative]['resolved_fixed'] += 1
+                    elif bug['resolution'] == 'INVALID':
+                        stats[initiative]['resolved_invalid'] += 1
+                    else:
+                        stats[initiative]['resolved_other'] += 1
         return stats
 
     def count_team_bugs(bugs):
